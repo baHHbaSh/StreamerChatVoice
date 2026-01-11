@@ -1,6 +1,7 @@
 import time, pyttsx3, sounddevice as sd
 import datetime, time
-from threading import Thread
+from threading import Thread, Lock, Timer
+from queue import Queue
 import traceback
 import re
 
@@ -135,6 +136,80 @@ def numbers_to_words(text: str) -> str:
     
     return result
 
+def transliterate_english(text: str) -> str:
+    """
+    Транслитерирует английские слова в русские буквы с учетом диграфов
+    
+    Args:
+        text: Текст с возможными английскими словами
+        
+    Returns:
+        Текст с транслитерированными английскими словами
+        
+    Example:
+        "Hello world" -> "Хелло ворлд"
+        "Привет hello" -> "Привет хелло"
+        "shoot" -> "шут"
+        "think" -> "зинк"
+    """
+    text = text.replace('_', ' ')
+    
+    # Словарь диграфов (двухбуквенные комбинации) - обрабатываются первыми
+    digraphs = {
+        'sh': 'ш', 'ch': 'ч', 'th': 'з', 'ph': 'ф', 'zh': 'ж',
+        'ts': 'ц', 'ck': 'к', 'ng': 'нг', 'qu': 'кв',
+        'Sh': 'Ш', 'Ch': 'Ч', 'Th': 'З', 'Ph': 'Ф', 'Zh': 'Ж',
+        'Ts': 'Ц', 'Ck': 'К', 'Ng': 'Нг', 'Qu': 'Кв',
+        'SH': 'Ш', 'CH': 'Ч', 'TH': 'З', 'PH': 'Ф', 'ZH': 'Ж',
+        'TS': 'Ц', 'CK': 'К', 'NG': 'Нг', 'QU': 'Кв'
+    }
+    
+    # Словарь одиночных букв
+    translit_map = {
+        'a': 'а', 'b': 'б', 'c': 'к', 'd': 'д', 'e': 'е', 'f': 'ф',
+        'g': 'г', 'h': 'х', 'i': 'и', 'j': 'дж', 'k': 'к', 'l': 'л',
+        'm': 'м', 'n': 'н', 'o': 'о', 'p': 'п', 'q': 'к', 'r': 'р',
+        's': 'с', 't': 'т', 'u': 'у', 'v': 'в', 'w': 'в', 'x': 'кс',
+        'y': 'й', 'z': 'з',
+        'A': 'А', 'B': 'Б', 'C': 'К', 'D': 'Д', 'E': 'Е', 'F': 'Ф',
+        'G': 'Г', 'H': 'Х', 'I': 'И', 'J': 'Дж', 'K': 'К', 'L': 'Л',
+        'M': 'М', 'N': 'Н', 'O': 'О', 'P': 'П', 'Q': 'К', 'R': 'Р',
+        'S': 'С', 'T': 'Т', 'U': 'У', 'V': 'В', 'W': 'В', 'X': 'Кс',
+        'Y': 'Й', 'Z': 'З'
+    }
+    
+    def transliterate_word(match):
+        """
+        Транслитерирует одно английское слово с учетом диграфов
+        """
+        word = match.group(0)
+        result = ''
+        i = 0
+        
+        while i < len(word):
+            # Проверяем диграфы (двухбуквенные комбинации)
+            if i < len(word) - 1:
+                digraph = word[i:i+2]
+                if digraph in digraphs:
+                    result += digraphs[digraph]
+                    i += 2  # Пропускаем обе буквы
+                    continue
+            
+            # Обрабатываем одиночную букву
+            char = word[i]
+            if char in translit_map:
+                result += translit_map[char]
+            else:
+                result += char  # Оставляем как есть, если не латинская буква
+            i += 1
+        
+        return result
+    
+    # Ищем английские слова (последовательности латинских букв) и транслитерируем их
+    result = re.sub(r'\b[a-zA-Z]+\b', transliterate_word, text)
+    
+    return result
+
 def дозапись(x: str, path_to_file):
 	pass
 	#Thread(target=__Append, args=(x, path_to_file)).run Не думаю что стоит это возвращать в код
@@ -148,9 +223,20 @@ def __Append(x:str, path_to_file):
 		with open(path_to_file, "w") as file:
 			file.write("Start file")
 class tts:
+	"""
+	Класс для синтеза речи с поддержкой асинхронного воспроизведения
+	"""
 	def __init__(self):
+		"""
+		Инициализация класса TTS
+		"""
 		self.async_mode = True
 		self.model = "silero"#win
+		self._activeTimers: list[Timer] = []  # Список активных таймеров
+		self._loopLock = Lock()  # Блокировка для синхронизации доступа к таймерам
+		self._isPlaying = False  # Флаг воспроизведения аудио
+		self._messageQueue = Queue()  # Очередь сообщений для воспроизведения (потокобезопасна)
+		self._processingLock = Lock()  # Блокировка для предотвращения одновременного запуска обработки очереди
 	def ospeak(self, text, print_audio = True):
 		text = numbers_to_words(text).replace("+", " плюс ").replace("%", " проц ").replace('*', " Звёздочка ").replace("  ", ' ')
 		if self.model == "win":
@@ -171,20 +257,124 @@ class tts:
 			ttss.runAndWait()
 		except:
 			print("[INFO] Поток tts загружен")
+	def setTimeout(self, callback, delay: float) -> Timer:
+		"""
+		Аналог setTimeout из JavaScript - выполняет функцию через указанное время
+		
+		Args:
+			callback: Функция для выполнения
+			delay: Задержка в секундах
+			
+		Returns:
+			Объект Timer, который можно отменить через cancel()
+		"""
+		def wrapper():
+			try:
+				callback()
+			except Exception as e:
+				print(f"⚠️ Ошибка в setTimeout callback: {e}")
+			finally:
+				# Удаляем таймер из списка активных
+				with self._loopLock:
+					if timer in self._activeTimers:
+						self._activeTimers.remove(timer)
+		
+		timer = Timer(delay, wrapper)
+		timer.daemon = True  # Поток завершится вместе с основным
+		
+		with self._loopLock:
+			self._activeTimers.append(timer)
+		
+		timer.start()
+		return timer
+	
 	def nar_speak(self, text: str, print_audio=True):
+		"""
+		Добавляет текст в очередь для воспроизведения через синтез речи Silero
+		
+		Args:
+			text: Текст для озвучивания
+			print_audio: Выводить ли текст в консоль
+		"""
+		# Добавляем сообщение в очередь (Queue потокобезопасна)
+		self._messageQueue.put((text, print_audio))
+		
+		# Если сейчас ничего не воспроизводится, запускаем обработку очереди
+		# Используем блокировку, чтобы избежать запуска нескольких обработчиков одновременно
+		with self._processingLock:
+			if not self._isPlaying:
+				self._isPlaying = True
+				Thread(target=self._process_queue, daemon=True).start()
+	
+	def _process_queue(self):
+		"""
+		Обрабатывает очередь сообщений, воспроизводя их последовательно
+		"""
 		global modelTTS, speaker, sample_rate, put_accent, put_yo
+		
+		# Продолжаем обработку, пока очередь не пуста
+		while True:
+			try:
+				# Получаем сообщение из очереди
+				# Используем get_nowait, чтобы не блокироваться, если очередь пуста
+				try:
+					text, print_audio = self._messageQueue.get_nowait()
+				except Exception:
+					# Очередь пуста, завершаем обработку
+					break
+				
+				# Воспроизводим текущее сообщение
+				try:
+					# Транслитерируем английские слова перед отправкой в TTS
+					transliterated_text = transliterate_english(text)
+					
+					# Генерируем аудио
+					audio = modelTTS.apply_tts(text=transliterated_text+"...   ",
+											speaker=speaker,
+											sample_rate=sample_rate,
+											put_accent=put_accent,
+											put_yo=put_yo)
+					
+					if print_audio:
+						print(text)
+					
+					# Воспроизводим аудио
+					sd.play(audio, sample_rate * 1.05)
+					
+					# Вычисляем длительность воспроизведения
+					duration = (len(audio) / sample_rate) + 0.1
+					
+					# Ждем завершения воспроизведения (блокирующее ожидание)
+					time.sleep(duration)
+					
+					# Останавливаем воспроизведение
+					sd.stop()
+					
+				except Exception as e:
+					print(f"❌ Ошибка при воспроизведении: {e}")
+					print(traceback.format_exc())
+				
+				# Помечаем задачу как выполненную
+				self._messageQueue.task_done()
+				
+			except Exception as e:
+				print(f"❌ Ошибка при обработке очереди: {e}")
+				print(traceback.format_exc())
+				break
+		
+		# Когда очередь пуста, сбрасываем флаг воспроизведения
+		with self._processingLock:
+			self._isPlaying = False
+	
+	def _stop_audio(self):
+		"""
+		Останавливает воспроизведение аудио
+		"""
 		try:
-			audio = modelTTS.apply_tts(text=text+"...   ",
-									speaker=speaker,
-									sample_rate=sample_rate,
-									put_accent=put_accent,
-									put_yo=put_yo)
-			if print_audio:
-				print(text)
-			sd.play(audio, sample_rate * 1.05)
-			time.sleep((len(audio) / sample_rate) + 0.5)
 			sd.stop()
-		except:print(traceback.format_exc())
+			self._isPlaying = False
+		except Exception as e:
+			print(f"⚠️ Ошибка при остановке аудио: {e}")
 	def SaveToFile(self, text):
 		ttss = pyttsx3.init()
 		ttss.setProperty('voice', 'ru')
