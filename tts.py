@@ -4,6 +4,7 @@ from threading import Thread, Lock, Timer
 from queue import Queue
 import traceback
 import re
+from Accent import*
 
 import torch
 
@@ -25,6 +26,8 @@ modelTTS, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
 						  speaker=model_id,
 						  name = name)
 modelTTS.to(device)
+
+Accenter = SSMLGenerator("http://localhost:8786/v1")
 
 def numbers_to_words(text: str) -> str:
     """
@@ -238,7 +241,7 @@ class tts:
 		self._messageQueue = Queue()  # Очередь сообщений для воспроизведения (потокобезопасна)
 		self._processingLock = Lock()  # Блокировка для предотвращения одновременного запуска обработки очереди
 	def ospeak(self, text, print_audio = True):
-		text = numbers_to_words(text).replace("+", " плюс ").replace("%", " проц ").replace('*', " Звёздочка ").replace("  ", ' ')
+		text = numbers_to_words(text)
 		if self.model == "win":
 			if self.async_mode:
 				Thread(target=self.ospeak_n_a, args=(text, print_audio)).run()
@@ -327,16 +330,43 @@ class tts:
 				try:
 					# Транслитерируем английские слова перед отправкой в TTS
 					transliterated_text = transliterate_english(text)
+
+					ssml = None
+					if self._messageQueue.qsize() < 3:
+						ssml = Accenter.text_to_ssml(text, use_fallback=True, style="cheerful")
+
+					if ssml is None or ssml and ssml.startswith("<speak>"):
+						try:
+							audio = modelTTS.apply_tts(ssml_text=ssml,
+								speaker=speaker,
+								sample_rate=sample_rate
+							)
+							if print_audio:
+								print(ssml)
+						except:
+							print("Exeption:\n")
+							print(f"\n{ssml}\n")
+							traceback.print_exc()
+							# Генерируем аудио
+							audio = modelTTS.apply_tts(text=transliterated_text+"...   ",
+								speaker=speaker,
+								sample_rate=sample_rate,
+								put_accent=put_accent,
+								put_yo=put_yo
+							)
+							if print_audio:
+								print(text)
+					else:
+						# Генерируем аудио
+						audio = modelTTS.apply_tts(text=transliterated_text+"...   ",
+							speaker=speaker,
+							sample_rate=sample_rate,
+							put_accent=put_accent,
+							put_yo=put_yo
+						)
+						if print_audio:
+							print(text)
 					
-					# Генерируем аудио
-					audio = modelTTS.apply_tts(text=transliterated_text+"...   ",
-											speaker=speaker,
-											sample_rate=sample_rate,
-											put_accent=put_accent,
-											put_yo=put_yo)
-					
-					if print_audio:
-						print(text)
 					
 					# Воспроизводим аудио
 					sd.play(audio, sample_rate * 1.05)

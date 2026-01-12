@@ -13,8 +13,13 @@ def log(message: ChatMessage):
     # Можно использовать структурированные данные
     print(f"💬 [{message.TimestampFormatted}] {message.Author}: {message.Message}\n")
 
-def Sound(message: ChatMessage):
+def Sound(message: ChatMessage):{
     TTS.ospeak(message.Message, False)
+    .replace("+", " плюс ")
+    .replace("%", " проц ")
+    .replace('*', " Звёздочка ")
+    .replace("  ", ' ')
+}
 
 def main():
     """
